@@ -13,6 +13,7 @@ from .pipeline import (
     run_graduate,
     run_measure,
     run_ads_review,
+    run_preview,
     run_promote,
     run_publish,
     run_status,
@@ -29,6 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("check", help="verify credentials, folders and tooling")
+
+    preview = sub.add_parser(
+        "preview", help="render treatments into Dropbox without publishing anything"
+    )
+    preview.add_argument(
+        "--file", default="", help="file name in the inbox (default: the newest)"
+    )
+    preview.add_argument("--count", type=int, default=0, help="how many treatments")
     sub.add_parser("publish", help="render the next Dropbox drop and publish trial reels")
 
     measure = sub.add_parser("measure", help="pull insights and rank a due batch")
@@ -84,6 +93,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "check":
             return run_check(config)
+
+        if args.command == "preview":
+            return run_preview(config, source_name=args.file, count=args.count)
 
         store = Store()
         if args.command == "publish":

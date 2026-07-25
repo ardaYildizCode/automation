@@ -193,15 +193,29 @@ Created automatically on first run, or make them yourself:
 Name files `product_price_sizes.mp4` (e.g. `elbise_450_2-8yas.mp4`) and the
 caption fills itself in. Unstructured names still work.
 
-### 5. Verify
+### 5. See it before trusting it
 
-Actions -> **Publish trial reels** -> Run workflow with **dry run** ticked. It
-renders all ten and publishes nothing. Or locally:
+The preview path needs **only the Dropbox secrets** — no Instagram token, no ad
+account. It renders the treatments into Dropbox and publishes nothing.
+
+1. Put a video or photo in `/ReelForge/Gelen`
+2. Actions -> **Onizleme (test)** -> Run workflow
+3. Open `/ReelForge/Onizleme/<date>/` in the Dropbox app and watch them
+
+`OKUBENI.md` in that folder lists what each variant changed and the caption
+that would have been posted.
+
+Add `OPENROUTER_API_KEY` and the same preview runs through the AI art director
+instead of the built-in catalogue, so you can compare the two before spending
+anything.
+
+Once the Instagram token exists, verify the rest:
 
 ```bash
 pip install -r requirements.txt
 export PYTHONPATH=src
-python -m reelforge check
+python -m reelforge check      # credentials, fonts, drawtext, music, model
+python -m reelforge preview    # same as the workflow, run locally
 ```
 
 ---

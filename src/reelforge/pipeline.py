@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 
 # Enough for variety without downloading a whole library every run.
 MAX_MUSIC_TRACKS = 12
+PREVIEW_FOLDER = "/ReelForge/Onizleme"
 
 
 class PipelineError(RuntimeError):
@@ -553,6 +554,98 @@ def run_promote(
 
     deliver(config, f"{batch.id}-ad", "\n".join(l for l in lines if l))
     log.info("Batch %s promoted", batch_id)
+    return 0
+
+
+# ---------------------------------------------------------------- preview
+
+
+def run_preview(config: Config, *, source_name: str = "", count: int = 0) -> int:
+    """Render treatments to Dropbox and publish nothing.
+
+    The cheapest way to see what the pipeline would post: needs only Dropbox
+    credentials, touches no Instagram or Meta endpoint, and writes no state.
+    """
+    ensure_ffmpeg()
+    dropbox = Dropbox(config)
+    for folder in (config.dropbox_inbox, config.dropbox_music, PREVIEW_FOLDER):
+        dropbox.ensure_folder(folder)
+
+    candidates = dropbox.list_media(config.dropbox_inbox)
+    if not candidates:
+        raise PipelineError(
+            f"No media in {config.dropbox_inbox}. Put a video or photo there first."
+        )
+
+    if source_name:
+        source = next((c for c in candidates if c.name.lower() == source_name.lower()), None)
+        if source is None:
+            available = ", ".join(c.name for c in candidates[:10])
+            raise PipelineError(f"{source_name!r} not found. Available: {available}")
+    else:
+        source = candidates[-1]  # newest, which is what you just dropped in
+
+    wanted = count or config.variant_count
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    target = f"{PREVIEW_FOLDER}/{stamp}"
+    dropbox.ensure_folder(target)
+
+    log.info("Previewing %s -> %s", source.name, target)
+    rendered_names: list[str] = []
+
+    with tempfile.TemporaryDirectory(prefix="reelforge-preview-") as tmp:
+        workdir = Path(tmp)
+        local_source = dropbox.download(source.path, workdir / source.name)
+        info = probe(local_source)
+
+        music_dir = workdir / "music"
+        tracks = _fetch_music(dropbox, config, music_dir)
+
+        direction = direct(
+            make_llm(config), local_source, info, workdir,
+            filename=source.name,
+            variant_count=wanted,
+            fallback_caption=build_caption(config, source.name),
+            music_tracks=tracks,
+        )
+
+        compositor = Compositor(workdir / "out", music_dir if tracks else None)
+        for treatment in direction.treatments:
+            try:
+                rendered = compositor.render(local_source, treatment, info, "onizleme")
+            except Exception as exc:  # noqa: BLE001 - report and keep going
+                log.error("%s failed: %s", treatment.key, exc)
+                continue
+            dropbox.upload(rendered, f"{target}/{rendered.name}")
+            rendered_names.append(rendered.name)
+
+        notes = [
+            f"# Onizleme {stamp}",
+            "",
+            f"Kaynak: {source.name}",
+            f"Yonlendirme: {'AI' if direction.ai_generated else 'varsayilan katalog'}",
+            f"Muzik: {len(tracks)} parca" if tracks else "Muzik: yok",
+            "",
+            "## Caption",
+            "",
+            direction.caption,
+            "",
+            "## Varyantlar",
+            "",
+        ]
+        for treatment in direction.treatments:
+            notes.append(f"- **{treatment.key}** - {treatment.summary()}")
+            if treatment.rationale:
+                notes.append(f"  - {treatment.rationale}")
+        report = "\n".join(notes)
+
+        summary = workdir / "OKUBENI.md"
+        summary.write_text(report, encoding="utf-8")
+        dropbox.upload(summary, f"{target}/OKUBENI.md")
+
+    deliver(config, f"preview-{stamp}", report)
+    print(f"\n{len(rendered_names)} varyant hazir: Dropbox {target}")
+    print("Telefonundan Dropbox uygulamasiyla izleyebilirsin. Instagram'a hicbir sey gitmedi.")
     return 0
 
 
