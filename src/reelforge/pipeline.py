@@ -9,7 +9,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .ai import LlmClient
+from .adsmanager import AdsManager, format_review
 from .config import REPO_ROOT, Config
+from .director import direct
 from .dropbox_client import Dropbox, DropboxFile
 from .editor import VariantRenderer, ensure_ffmpeg, load_recipes, probe
 from .http import ApiError
@@ -26,6 +29,17 @@ RECIPES_PATH = REPO_ROOT / "variants.yaml"
 
 class PipelineError(RuntimeError):
     pass
+
+
+def make_llm(config: Config) -> LlmClient | None:
+    """The AI layer is optional everywhere; absence degrades, never breaks."""
+    if not config.ai_enabled:
+        return None
+    return LlmClient(
+        api_key=config.llm_api_key,
+        model=config.llm_model,
+        base_url=config.llm_base_url,
+    )
 
 
 # ---------------------------------------------------------------- helpers
@@ -113,7 +127,29 @@ def run_check(config: Config) -> int:
         print("[WARN] META_AD_ACCOUNT_ID / FACEBOOK_PAGE_ID unset -> `promote` disabled")
 
     recipes = load_recipes(RECIPES_PATH, config.variant_count)
-    print(f"[ok] {len(recipes)} variant recipes loaded: {', '.join(r.key for r in recipes)}")
+    print(f"[ok] {len(recipes)} fallback recipes loaded: {', '.join(r.key for r in recipes)}")
+
+    if config.ai_enabled:
+        client = make_llm(config)
+        try:
+            models = client.available_models()
+            if config.llm_model in models:
+                print(f"[ok] LLM: {config.llm_model} (ads mode: {config.ai_ads_mode})")
+            else:
+                problems.append(f"LLM model {config.llm_model} not offered by the provider")
+                print(f"[FAIL] LLM model {config.llm_model!r} is not available.")
+                close = [m for m in models if "claude" in m][:5]
+                if close:
+                    print(f"       try one of: {', '.join(close)}")
+        except Exception as exc:
+            problems.append(f"LLM: {exc}")
+            print(f"[FAIL] LLM unreachable: {exc}")
+    else:
+        print("[WARN] OPENROUTER_API_KEY unset -> fixed recipes, no AI ad review")
+
+    from .editor import find_font, has_drawtext
+    if not (find_font() and has_drawtext()):
+        print("[WARN] drawtext or font unavailable -> text variants render plain")
 
     if problems:
         print(f"\n{len(problems)} blocking problem(s) found.")
@@ -145,8 +181,6 @@ def run_publish(config: Config, store: Store) -> int:
     trial, detail = instagram.trial_reels_available()
     log.info("Trial reels %s: %s", "enabled" if trial else "DISABLED", detail)
 
-    recipes = load_recipes(RECIPES_PATH, config.variant_count)
-    caption = build_caption(config, source.name)
     batch = Batch(
         id=new_batch_id(),
         source_path=source.path,
@@ -165,6 +199,34 @@ def run_publish(config: Config, store: Store) -> int:
         log.info(
             "Source %s: %dx%d, %.1fs, audio=%s",
             source.name, info.width, info.height, info.duration, info.has_audio,
+        )
+
+        # The model looks at real frames and decides how to cut this clip;
+        # without a key it silently falls back to the fixed catalogue.
+        direction = direct(
+            make_llm(config),
+            local_source,
+            info,
+            workdir,
+            filename=source.name,
+            variant_count=config.variant_count,
+            fallback_caption=build_caption(config, source.name),
+        )
+        recipes = direction.recipes
+        caption = direction.caption
+        batch.direction = {
+            "source": direction.source,
+            "product": direction.product_name,
+            "observations": direction.observations,
+            "rationales": direction.rationales,
+            "caption": caption,
+        }
+        if direction.product_name:
+            batch.product = direction.product_name
+        batch.notes.append(
+            "Variants chosen by AI art direction"
+            if direction.ai_generated
+            else "Variants from the default catalogue (no AI)"
         )
 
         renderer = VariantRenderer(workdir / "out")
@@ -294,7 +356,9 @@ def run_measure(config: Config, store: Store, *, force: bool = False) -> int:
 # ---------------------------------------------------------------- graduate
 
 
-def run_graduate(config: Config, store: Store, batch_id: str) -> int:
+def run_graduate(
+    config: Config, store: Store, batch_id: str, *, also: list[str] | None = None
+) -> int:
     """Record that the winner was graduated by hand in the Instagram app.
 
     There is no Graph API endpoint for this, so the pipeline tracks the fact
@@ -310,6 +374,13 @@ def run_graduate(config: Config, store: Store, batch_id: str) -> int:
 
     batch.status = BatchStatus.GRADUATED
     batch.graduated_at = utcnow()
+    for key in [batch.winner_key, *(also or [])]:
+        if not key:
+            continue
+        if batch.variant(key) is None:
+            raise PipelineError(f"Batch {batch_id} has no variant {key!r}")
+        if key not in batch.graduated_keys:
+            batch.graduated_keys.append(key)
     store.save()
 
     winner = batch.winner
@@ -323,7 +394,14 @@ def run_graduate(config: Config, store: Store, batch_id: str) -> int:
 # ---------------------------------------------------------------- promote
 
 
-def run_promote(config: Config, store: Store, batch_id: str, *, budget: int | None = None) -> int:
+def run_promote(
+    config: Config,
+    store: Store,
+    batch_id: str,
+    *,
+    budget: int | None = None,
+    ab_cells: int = 2,
+) -> int:
     batch = store.get(batch_id)
     if batch is None:
         raise PipelineError(f"Unknown batch {batch_id!r}")
@@ -348,33 +426,99 @@ def run_promote(config: Config, store: Store, batch_id: str, *, budget: int | No
     except AdsError as exc:
         raise PipelineError(str(exc)) from exc
 
-    chain = ads.create_ad_from_ig_post(
-        ig_media_id=winner.ig_media_id,
-        name_prefix=f"RF {batch.product or batch.id}"[:60],
-        daily_budget_try=budget,
-    )
-    batch.ad = chain.to_dict()
+    name_prefix = f"RF {batch.product or batch.id}"[:60]
+
+    # Only variants that were graduated are visible to followers; a trial reel
+    # behind an ad would be shown to an audience that cannot see the post.
+    contenders = [
+        (v.key, v.ig_media_id)
+        for v in batch.top_variants(ab_cells)
+        if v.key in batch.graduated_keys and v.ig_media_id
+    ]
+
+    if len(contenders) >= 2:
+        test = ads.create_ab_test(
+            contenders=contenders,
+            name_prefix=name_prefix,
+            daily_budget_try=budget,
+        )
+        batch.ad = test.to_dict()
+        lines = [
+            f"# A/B reklam testi kuruldu - `{batch.id}`",
+            "",
+            f"- Kampanya: `{test.campaign_id}`",
+            f"- Hucre basina butce: **{test.cell_budget_try} TRY/gun**",
+            "",
+            "| Varyant | Ad set | Reklam | Gonderi |",
+            "|---|---|---|---|",
+        ]
+        for cell in test.cells:
+            variant = batch.variant(cell["variant_key"])
+            link = variant.permalink if variant else ""
+            lines.append(
+                f"| {variant.label if variant else cell['variant_key']} "
+                f"| `{cell['adset_id']}` | `{cell['ad_id']}` | {link} |"
+            )
+        warnings = test.warnings
+    else:
+        chain = ads.create_ad_from_ig_post(
+            ig_media_id=winner.ig_media_id,
+            name_prefix=name_prefix,
+            daily_budget_try=budget,
+        )
+        batch.ad = chain.to_dict()
+        lines = [
+            f"# Reklam kuruldu - `{batch.id}`",
+            "",
+            f"Kazanan varyant: **{winner.label}** (`{winner.key}`)",
+            f"Gonderi: {winner.permalink}" if winner.permalink else "",
+            "",
+            f"- Kampanya: `{chain.campaign_id}`",
+            f"- Ad set: `{chain.adset_id}`",
+            f"- Kreatif: `{chain.creative_id}`",
+            f"- Reklam: `{chain.ad_id}`",
+            "",
+            "Tek kazanan mezun edildigi icin A/B yerine tek reklam kuruldu. "
+            "A/B icin en az iki varyanti mezun et.",
+        ]
+        warnings = chain.warnings
+
     batch.status = BatchStatus.PROMOTED
     store.save()
 
-    lines = [
-        f"# Reklam kuruldu - `{batch.id}`",
-        "",
-        f"Kazanan varyant: **{winner.label}** (`{winner.key}`)",
-        f"Gonderi: {winner.permalink}" if winner.permalink else "",
-        "",
-        f"- Kampanya: `{chain.campaign_id}`",
-        f"- Ad set: `{chain.adset_id}`",
-        f"- Kreatif: `{chain.creative_id}`",
-        f"- Reklam: `{chain.ad_id}`",
-        "",
-        "**Hepsi PAUSED.**",
-    ]
-    if chain.warnings:
-        lines += ["", "## Dikkat"] + [f"- {w}" for w in chain.warnings]
+    lines += ["", "**Hepsi PAUSED.**"]
+    if warnings:
+        lines += ["", "## Dikkat"] + [f"- {w}" for w in warnings]
 
-    deliver(config, f"{batch.id}-ad", "\n".join(l for l in lines if l is not None))
-    log.info("Batch %s promoted: ad %s", batch_id, chain.ad_id)
+    deliver(config, f"{batch.id}-ad", "\n".join(l for l in lines if l))
+    log.info("Batch %s promoted", batch_id)
+    return 0
+
+
+# ---------------------------------------------------------------- ads review
+
+
+def run_ads_review(config: Config, store: Store, *, apply: bool | None = None) -> int:
+    """AI reads the whole account and proposes actions; rules decide."""
+    if config.ai_ads_mode == "off":
+        log.info("AI_ADS_MODE=off; skipping.")
+        return 0
+
+    should_apply = config.ai_ads_mode == "apply" if apply is None else apply
+    try:
+        manager = AdsManager(config, make_llm(config))
+    except AdsError as exc:
+        raise PipelineError(str(exc)) from exc
+
+    review = manager.review(apply=should_apply)
+    report = format_review(review)
+    deliver(config, f"ads-{datetime.now(timezone.utc):%Y%m%d-%H%M}", report)
+
+    log.info(
+        "Ads review: %d proposed, %d accepted, %d applied",
+        len(review.proposals), len(review.accepted),
+        sum(1 for p in review.accepted if p.applied),
+    )
     return 0
 
 

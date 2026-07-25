@@ -78,8 +78,12 @@ class Batch:
     measured_at: str = ""
     graduated_at: str = ""
     winner_key: str = ""
+    # Which variants you actually tapped "Share with everyone" on. Only these
+    # are visible to followers and therefore eligible to carry ad spend.
+    graduated_keys: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     ad: dict[str, Any] = field(default_factory=dict)
+    direction: dict[str, Any] = field(default_factory=dict)
 
     def variant(self, key: str) -> Variant | None:
         return next((v for v in self.variants if v.key == key), None)
@@ -91,6 +95,11 @@ class Batch:
     @property
     def published_variants(self) -> list[Variant]:
         return [v for v in self.variants if v.published]
+
+    def top_variants(self, count: int) -> list[Variant]:
+        """Best-ranked published variants, for seeding an A/B test."""
+        ranked = [v for v in self.published_variants if v.rank > 0]
+        return sorted(ranked, key=lambda v: v.rank)[:count]
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

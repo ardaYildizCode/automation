@@ -12,6 +12,7 @@ from .pipeline import (
     run_check,
     run_graduate,
     run_measure,
+    run_ads_review,
     run_promote,
     run_publish,
     run_status,
@@ -39,10 +40,27 @@ def build_parser() -> argparse.ArgumentParser:
         "graduate", help="record that you graduated the winner in the Instagram app"
     )
     graduate.add_argument("batch_id")
+    graduate.add_argument(
+        "--also",
+        nargs="*",
+        default=[],
+        metavar="KEY",
+        help="extra variant keys you graduated, so they can join the A/B test",
+    )
 
     promote = sub.add_parser("promote", help="build a paused ad from the graduated winner")
     promote.add_argument("batch_id")
-    promote.add_argument("--budget", type=int, help="daily budget in TRY")
+    promote.add_argument("--budget", type=int, help="daily budget in TRY per cell")
+    promote.add_argument(
+        "--cells", type=int, default=2,
+        help="how many graduated variants to run against each other (default 2)",
+    )
+
+    ads = sub.add_parser("ads", help="AI review of the ad account")
+    ads.add_argument(
+        "--apply", action="store_true",
+        help="execute the proposals that pass the rule engine",
+    )
 
     sub.add_parser("status", help="show recent batches")
     return parser
@@ -73,9 +91,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "measure":
             return run_measure(config, store, force=args.force)
         if args.command == "graduate":
-            return run_graduate(config, store, args.batch_id)
+            return run_graduate(config, store, args.batch_id, also=args.also)
         if args.command == "promote":
-            return run_promote(config, store, args.batch_id, budget=args.budget)
+            return run_promote(
+                config, store, args.batch_id, budget=args.budget, ab_cells=args.cells
+            )
+        if args.command == "ads":
+            return run_ads_review(config, store, apply=args.apply or None)
         if args.command == "status":
             return run_status(config, store)
     except PipelineError as exc:

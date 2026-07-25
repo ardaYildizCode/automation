@@ -1,15 +1,14 @@
-name: Publish trial reels
+name: AI ad review
 
-# Picks up the oldest unprocessed file in the Dropbox inbox, renders the ten
-# variants and publishes them as trial reels.
+# The model reads the whole account and proposes actions; the rule engine in
+# adsmanager.py decides which of them are allowed to execute.
 on:
   schedule:
-    # 06:00 UTC = 09:00 Europe/Istanbul
-    - cron: "0 6 * * *"
+    - cron: "0 7 * * *"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Render variants but publish nothing"
+      apply:
+        description: "Execute proposals that pass the rules (otherwise propose only)"
         type: boolean
         default: false
 
@@ -21,24 +20,18 @@ permissions:
   contents: write
 
 jobs:
-  publish:
+  review:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      - run: pip install -r requirements.txt
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Verify ffmpeg
-        run: ffmpeg -version | head -1
-
-      - name: Publish
+      - name: Review
         env:
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
@@ -49,33 +42,25 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           META_AD_ACCOUNT_ID: ${{ vars.META_AD_ACCOUNT_ID }}
           FACEBOOK_PAGE_ID: ${{ vars.FACEBOOK_PAGE_ID }}
-          DROPBOX_INBOX: ${{ vars.DROPBOX_INBOX }}
-          DROPBOX_PROCESSED: ${{ vars.DROPBOX_PROCESSED }}
-          DROPBOX_RENDERS: ${{ vars.DROPBOX_RENDERS }}
-          VARIANT_COUNT: ${{ vars.VARIANT_COUNT }}
-          TRIAL_GRADUATION_STRATEGY: ${{ vars.TRIAL_GRADUATION_STRATEGY }}
-          MAX_BATCHES_PER_DAY: ${{ vars.MAX_BATCHES_PER_DAY }}
-          CAPTION_TEMPLATE: ${{ vars.CAPTION_TEMPLATE }}
+          AI_ADS_MODE: ${{ vars.AI_ADS_MODE }}
+          MAX_ACCOUNT_DAILY_BUDGET_TRY: ${{ vars.MAX_ACCOUNT_DAILY_BUDGET_TRY }}
+          PROTECTED_ENTITY_IDS: ${{ vars.PROTECTED_ENTITY_IDS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DRY_RUN: ${{ inputs.dry_run }}
           PYTHONPATH: src
-        run: python -m reelforge publish
+        run: python -m reelforge ads ${{ inputs.apply && '--apply' || '' }}
 
-      - name: Commit state
+      - name: Commit reports
+        if: always()
         run: |
-          if [ -z "$(git status --porcelain state reports)" ]; then
-            echo "No state change."
-            exit 0
-          fi
+          if [ -z "$(git status --porcelain state reports)" ]; then exit 0; fi
           git config user.name "reelforge[bot]"
           git config user.email "reelforge@users.noreply.github.com"
           git add state reports
-          git commit -m "chore(state): publish run [skip ci]"
+          git commit -m "chore(state): ads review [skip ci]"
           for attempt in 1 2 3 4; do
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
               git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
-            echo "Push attempt $attempt failed; retrying."
             sleep $((2 ** attempt))
           done
           exit 1

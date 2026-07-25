@@ -1,18 +1,25 @@
 # ReelForge
 
-Drop one video or photo into Dropbox. Ten professionally finished variants get
-rendered, published as Instagram **trial reels** (visible only to non-followers),
-ranked on real retention data, and the winner becomes a Meta ad.
+Drop one video or photo into Dropbox. An AI art director looks at the actual
+footage and decides how to cut it, ten professionally finished variants get
+rendered and published as Instagram **trial reels** (visible only to
+non-followers), ranked on real retention data, and the winners go head to head
+as a Meta A/B test.
 
 ```
 Dropbox inbox
+   -> AI looks at real frames: which edits suit THIS clip,
+      Turkish hook copy, caption, cover frame
    -> 10 ffmpeg variants (1080x1920, Rec.709, loudness-matched)
    -> 10 trial reels on @annekiz.store
    -> 24h later: insights pulled, variants ranked
-   -> report tells you which one to graduate
-   -> you tap "Share with everyone" in the app
-   -> paused ad built from the winner
+   -> report tells you which ones to graduate
+   -> you tap "Share with everyone"
+   -> paused A/B ad test built from the graduated winners
 ```
+
+Separately, a daily AI review reads the whole ad account and proposes budget
+and pause actions, which a rule engine vets before anything executes.
 
 Runs entirely on GitHub Actions. Nothing needs your PC to be on, and it does not
 need ffmpeg or Python working locally.
@@ -39,6 +46,43 @@ comfortably; the pipeline still re-checks at runtime and falls back to publishin
 normal reels rather than failing.
 
 ---
+
+## Where AI is used, and where it deliberately is not
+
+| Layer | Who decides | Why |
+|---|---|---|
+| Which edits suit a clip, hook copy, caption, cover frame | **AI** | Needs judgement about footage. Fixed recipes cannot tell a dark clip from a bright one, and the hook line was the same string on every video. |
+| Rendering, ranking, spend rules | **Code** | Already deterministic and known. A model adds risk here, not accuracy. |
+| Ad account actions | **AI proposes, code decides** | The model is good at reading a whole account at once. It is not something to give unsupervised write access to a live budget. |
+
+Every AI output is treated as untrusted input. Recipe kinds must exist in the
+catalogue, numeric parameters are clamped, hook text is sanitised for
+`drawtext`, and ad proposals are rejected unless they clear every spend rule.
+If `OPENROUTER_API_KEY` is missing the whole system falls back to the fixed
+recipes and keeps working.
+
+### The ad rule engine
+
+An AI proposal is **rejected** unless it passes all of these:
+
+- The entity is not on the protected list (the purchase campaign stays off
+  until the pixel is fixed).
+- The entity actually exists in the snapshot — guards against invented ids.
+- **Pause** needs spend >= 400 TRY *and* >= 30 results *and* cost above 1.5x
+  the account average. The one exception is a structurally broken ad set —
+  real spend with zero results — which can be paused during learning.
+  "Expensive" and "broken" are different problems.
+- No pausing or budget-cutting an ad set still inside its learning period
+  (under 50 results).
+- **Budget changes** are capped at ±25% per run, never below the 100 TRY/day
+  learning threshold, and never past the account daily cap.
+- At most 6 actions per run.
+
+`AI_ADS_MODE` controls what happens next: `propose` (default — reports only),
+`apply` (executes what passes), `off`.
+
+Start on `propose` and read a week of reports before switching. The rules are
+enforced either way, but on `propose` you see what it *would* have done.
 
 ## Setup
 
@@ -111,6 +155,7 @@ Secrets:
 | `DROPBOX_APP_KEY` | from step 2 |
 | `DROPBOX_APP_SECRET` | from step 2 |
 | `DROPBOX_REFRESH_TOKEN` | from step 2 |
+| `OPENROUTER_API_KEY` | from [openrouter.ai/keys](https://openrouter.ai/keys) — powers the art director and ad review |
 | `TELEGRAM_BOT_TOKEN` | optional, for phone notifications |
 | `TELEGRAM_CHAT_ID` | optional |
 
@@ -127,6 +172,10 @@ Variables (all optional, sensible defaults apply):
 | `MAX_BATCHES_PER_DAY` | `1` | guard against burning through the inbox |
 | `AD_DAILY_BUDGET_TRY` | `150` | forced up to 100 minimum |
 | `DROPBOX_INBOX` | `/ReelForge/Gelen` | |
+| `LLM_MODEL` | `anthropic/claude-sonnet-4.5` | Any vision-capable OpenRouter model. `check` verifies it exists. |
+| `AI_ADS_MODE` | `propose` | `propose`, `apply` or `off` |
+| `MAX_ACCOUNT_DAILY_BUDGET_TRY` | `500` | hard ceiling the AI cannot push past |
+| `PROTECTED_ENTITY_IDS` | the two known-dangerous campaigns | comma separated, never touched |
 
 ### 4. Dropbox folders
 
@@ -161,8 +210,9 @@ python -m reelforge check
 | You | Drop footage into `/ReelForge/Gelen` |
 | 09:00 TR, automatic | Ten trial reels go up |
 | +24h, automatic | Ranked; report lands in `reports/` and on Telegram |
-| You | Tap **Share with everyone** on the winner |
+| You | Tap **Share with everyone** on the winner (and the runner-up, for an A/B test) |
 | You | Actions -> **Graduate and promote** -> paste the batch id |
+| 10:00 TR, automatic | AI reviews the ad account and reports proposals |
 
 The ad is created **paused**, and API-created campaigns appear in Ads Manager as
 unpublished drafts behind **Review and Publish**. Nothing spends without you.
@@ -174,17 +224,38 @@ python -m reelforge check                 # verify everything is wired up
 python -m reelforge publish               # render + publish a batch
 python -m reelforge measure --force       # rank now, ignoring the age threshold
 python -m reelforge status                # what is in flight
-python -m reelforge graduate <batch-id>   # record that you tapped it
-python -m reelforge promote <batch-id>    # build the paused ad
+python -m reelforge graduate <id> --also runner_up_key   # record what you tapped
+python -m reelforge promote <id> --cells 2               # paused A/B test
+python -m reelforge ads                                  # AI account review
+python -m reelforge ads --apply                          # execute what passes
 ```
+
+### Getting an A/B test rather than a single ad
+
+`promote` builds a real split test when **two or more graduated variants** are
+available — one ad set per contender under a single campaign, so Meta divides
+the audience cleanly. Graduate the runner-up too and record it:
+
+```bash
+python -m reelforge graduate 20260725-0900-ab12ef --also hook_trim
+```
+
+With only one graduated variant it falls back to a single ad and says so.
+Each cell carries its own budget, so two cells at 150 TRY/day is 300 TRY/day
+once you activate them.
 
 ---
 
 ## The ten variants
 
-Tunable in [`variants.yaml`](variants.yaml). `control` must stay first — without
-an untouched baseline you cannot tell whether an edit helped or merely differed.
-All ten carry the **same caption**, so the edit is the only variable.
+With `OPENROUTER_API_KEY` set these are the **fallback** catalogue; the AI
+proposes a set tuned to each clip instead, choosing from the same recipe kinds
+and staying inside the clamped parameter ranges. A `control` baseline is always
+present, injected if the model omits it — without it you cannot tell whether an
+edit helped or merely differed. All variants carry the **same caption**, so the
+edit stays the only variable.
+
+Tunable in [`variants.yaml`](variants.yaml).
 
 | # | Key | Change |
 |--:|---|---|
@@ -275,5 +346,8 @@ no database, and full history in git. `reports/` holds every ranking report.
 PYTHONPATH=src python -m pytest tests/ -q
 ```
 
-99 tests. The editor ones render real media through ffmpeg, because filtergraph
-mistakes otherwise surface at 06:00 UTC rather than in CI.
+158 tests. The editor ones render real media through ffmpeg, because filtergraph
+mistakes otherwise surface at 06:00 UTC rather than in CI. The AI ones feed
+malformed and hostile model output through the validators — invented ad set
+ids, out-of-range saturation, emoji in hook text — because that is exactly what
+a model will eventually return.

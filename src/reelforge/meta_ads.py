@@ -48,6 +48,27 @@ class AdChain:
         }
 
 
+@dataclass
+class ABTest:
+    campaign_id: str = ""
+    cell_budget_try: int = 0
+    cells: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": "ab_test",
+            "campaign_id": self.campaign_id,
+            "cell_budget_try": self.cell_budget_try,
+            "cells": self.cells,
+            "warnings": self.warnings,
+        }
+
+    @property
+    def ad_ids(self) -> list[str]:
+        return [c["ad_id"] for c in self.cells]
+
+
 def default_targeting() -> dict:
     """Women 25-44 in Turkey.
 
@@ -180,3 +201,129 @@ class MetaAds:
             "to confirm it, otherwise discarding drafts deletes it."
         )
         return chain
+
+    def create_ab_test(
+        self,
+        *,
+        contenders: list[tuple[str, str]],
+        name_prefix: str,
+        daily_budget_try: int | None = None,
+        duration_days: int = 5,
+        targeting: dict | None = None,
+    ) -> ABTest:
+        """Run the top reels against each other as a real split test.
+
+        `contenders` is [(variant_key, ig_media_id), ...]. Each gets its own ad
+        set under one campaign so Meta splits the audience cleanly, and the
+        test is scored on cost per messaging conversation -- the only metric
+        that tracks money on this account.
+        """
+        if len(contenders) < 2:
+            raise AdsError("An A/B test needs at least two contenders.")
+
+        per_cell = (daily_budget_try or self.config.ad_daily_budget_try)
+        test = ABTest(cell_budget_try=max(per_cell, MIN_DAILY_BUDGET_TRY))
+        if per_cell < MIN_DAILY_BUDGET_TRY:
+            test.warnings.append(
+                f"Per-cell budget raised to {MIN_DAILY_BUDGET_TRY} TRY: each cell "
+                "must clear the learning threshold independently."
+            )
+
+        campaign = self._post(
+            f"{self.account}/campaigns",
+            {
+                "name": f"{name_prefix} | A/B test",
+                "objective": "OUTCOME_ENGAGEMENT",
+                "status": "PAUSED",
+                "special_ad_categories": json.dumps([]),
+            },
+            label="ads create ab campaign",
+        )
+        test.campaign_id = campaign["id"]
+
+        for variant_key, media_id in contenders:
+            cell = self._build_cell(
+                campaign_id=test.campaign_id,
+                variant_key=variant_key,
+                media_id=media_id,
+                name_prefix=name_prefix,
+                budget=test.cell_budget_try,
+                targeting=targeting or default_targeting(),
+            )
+            test.cells.append(cell)
+
+        test.warnings.append(
+            f"{len(test.cells)} cells at {test.cell_budget_try} TRY/day each = "
+            f"{test.cell_budget_try * len(test.cells)} TRY/day total when activated."
+        )
+        test.warnings.append(
+            f"Let it run {duration_days} days before judging. Score on "
+            "cost per messaging conversation, not CPC."
+        )
+        test.warnings.append(
+            "Everything is PAUSED and sits as an unpublished draft in Ads Manager."
+        )
+        return test
+
+    def _build_cell(
+        self,
+        *,
+        campaign_id: str,
+        variant_key: str,
+        media_id: str,
+        name_prefix: str,
+        budget: int,
+        targeting: dict,
+    ) -> dict:
+        adset_payload = {
+            "name": f"{name_prefix} | {variant_key}",
+            "campaign_id": campaign_id,
+            "daily_budget": str(budget * 100),
+            "billing_event": "IMPRESSIONS",
+            "optimization_goal": "REPLIES",
+            "destination_type": "WHATSAPP",
+            "targeting": json.dumps(targeting),
+            "promoted_object": json.dumps({"page_id": self.config.facebook_page_id}),
+            "status": "PAUSED",
+        }
+        try:
+            adset = self._post(f"{self.account}/adsets", adset_payload, label="ads ab adset")
+        except ApiError as exc:
+            log.warning("A/B cell %s: messaging destination rejected: %s", variant_key, exc)
+            adset_payload.pop("destination_type")
+            adset_payload.pop("promoted_object")
+            adset_payload["optimization_goal"] = "POST_ENGAGEMENT"
+            adset = self._post(
+                f"{self.account}/adsets", adset_payload, label="ads ab adset (fallback)"
+            )
+
+        creative = self._post(
+            f"{self.account}/adcreatives",
+            {
+                "name": f"{name_prefix} | {variant_key} | kreatif",
+                "object_id": self.config.facebook_page_id,
+                "instagram_user_id": self.config.ig_user_id,
+                "source_instagram_media_id": media_id,
+            },
+            label="ads ab creative",
+        )
+
+        ad = self._post(
+            f"{self.account}/ads",
+            {
+                "name": f"{name_prefix} | {variant_key} | reklam",
+                "adset_id": adset["id"],
+                "creative": json.dumps({"creative_id": creative["id"]}),
+                "status": "PAUSED",
+            },
+            label="ads ab ad",
+        )
+
+        log.info("A/B cell %s built: adset %s, ad %s", variant_key, adset["id"], ad["id"])
+        return {
+            "variant_key": variant_key,
+            "ig_media_id": media_id,
+            "adset_id": adset["id"],
+            "creative_id": creative["id"],
+            "ad_id": ad["id"],
+        }

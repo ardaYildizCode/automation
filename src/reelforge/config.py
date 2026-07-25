@@ -17,6 +17,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # version. Override with GRAPH_VERSION when Meta ships the next one.
 DEFAULT_GRAPH_VERSION = "v25.0"
 
+# Routed through OpenRouter so the model is a config change, not a code change.
+# Must be vision-capable: the art director sends real frames.
+DEFAULT_LLM_MODEL = "anthropic/claude-sonnet-4.5"
+
 
 class ConfigError(RuntimeError):
     """Raised when required configuration is missing or malformed."""
@@ -87,6 +91,14 @@ class Config:
     caption_template: str
     dry_run: bool
 
+    # --- AI --------------------------------------------------------------
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_base_url: str = ""
+    ai_ads_mode: str = "propose"
+    max_account_daily_budget_try: int = 500
+    protected_entity_ids: tuple[str, ...] = ()
+
     # --- Notifications --------------------------------------------------
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -100,6 +112,12 @@ class Config:
             raise ConfigError(
                 "TRIAL_GRADUATION_STRATEGY must be MANUAL or SS_PERFORMANCE, "
                 f"got {strategy!r}"
+            )
+
+        ai_ads_mode = _optional("AI_ADS_MODE", "propose").lower()
+        if ai_ads_mode not in {"propose", "apply", "off"}:
+            raise ConfigError(
+                f"AI_ADS_MODE must be propose, apply or off, got {ai_ads_mode!r}"
             )
 
         variant_count = _int("VARIANT_COUNT", 10)
@@ -132,6 +150,20 @@ class Config:
                 "Siparis ve fiyat icin DM veya WhatsApp: {whatsapp}",
             ),
             dry_run=_optional("DRY_RUN", "false").lower() in {"1", "true", "yes"},
+            llm_api_key=_optional("OPENROUTER_API_KEY"),
+            llm_model=_optional("LLM_MODEL", DEFAULT_LLM_MODEL),
+            llm_base_url=_optional("LLM_BASE_URL", "https://openrouter.ai/api/v1"),
+            ai_ads_mode=ai_ads_mode,
+            max_account_daily_budget_try=_int("MAX_ACCOUNT_DAILY_BUDGET_TRY", 500),
+            protected_entity_ids=tuple(
+                p.strip() for p in _optional(
+                    "PROTECTED_ENTITY_IDS",
+                    # Known-dangerous entities on this account: the purchase
+                    # campaign that must stay off until the pixel is fixed, and
+                    # an empty campaign left over from a failed attempt.
+                    "120249792730160256,120249793096760256",
+                ).split(",") if p.strip()
+            ),
             telegram_bot_token=_optional("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=_optional("TELEGRAM_CHAT_ID"),
             scoring_weights={
@@ -145,6 +177,10 @@ class Config:
     @property
     def graph_base(self) -> str:
         return f"https://graph.facebook.com/{self.graph_version}"
+
+    @property
+    def ai_enabled(self) -> bool:
+        return bool(self.llm_api_key)
 
     def ads_requirements_met(self) -> bool:
         """Ad creation needs more than publishing does."""
