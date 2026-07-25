@@ -28,6 +28,7 @@ SINGLE_SHOT_LIMIT = 140 * 1024 * 1024
 CHUNK = 8 * 1024 * 1024
 
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".m4v", ".jpg", ".jpeg", ".png", ".heic", ".webp"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
 
 
@@ -50,6 +51,10 @@ class DropboxFile:
     @property
     def is_media(self) -> bool:
         return self.suffix in MEDIA_EXTENSIONS
+
+    @property
+    def is_audio(self) -> bool:
+        return self.suffix in AUDIO_EXTENSIONS
 
 
 class Dropbox:
@@ -96,6 +101,11 @@ class Dropbox:
 
     def list_media(self, folder: str) -> list[DropboxFile]:
         """List media files directly inside `folder`, oldest first."""
+        return sorted(
+            [f for f in self._all_files(folder) if f.is_media], key=lambda f: f.modified
+        )
+
+    def _all_files(self, folder: str) -> list[DropboxFile]:
         entries: list[dict] = []
         try:
             page = self._rpc(
@@ -113,7 +123,7 @@ class Dropbox:
             page = self._rpc("files/list_folder/continue", {"cursor": page["cursor"]})
             entries.extend(page.get("entries", []))
 
-        files = [
+        return [
             DropboxFile(
                 name=e["name"],
                 path=e["path_lower"],
@@ -124,7 +134,11 @@ class Dropbox:
             for e in entries
             if e.get(".tag") == "file"
         ]
-        return sorted([f for f in files if f.is_media], key=lambda f: f.modified)
+
+    def list_audio(self, folder: str) -> list[DropboxFile]:
+        """Licensed music beds. Empty folder simply means no music layer."""
+        entries = self._all_files(folder)
+        return sorted([f for f in entries if f.is_audio], key=lambda f: f.name)
 
     # -- transfer -------------------------------------------------------
 

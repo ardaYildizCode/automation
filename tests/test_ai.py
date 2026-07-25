@@ -16,12 +16,22 @@ from reelforge.adsmanager import (
 from reelforge.ai import _parse_json, clamp
 from reelforge.config import Config
 from reelforge.director import (
-    ALLOWED_KINDS,
-    PARAM_BOUNDS,
-    _clamp_params,
     _safe_hook,
     _safe_key,
-    _validate_variants,
+    _validate_treatments,
+    default_treatments,
+)
+from reelforge.treatment import (
+    FONTS,
+    HOOK_ANIMATIONS,
+    HOOK_STYLES,
+    MAX_HOOK_CHARS,
+    MOTION_BOUNDS,
+    PALETTE,
+    Grade,
+    Hook,
+    Motion,
+    Music,
 )
 from reelforge.meta_ads import MIN_DAILY_BUDGET_TRY
 
@@ -67,62 +77,102 @@ def test_clamp_coerces_or_falls_back(value, expected):
 # -- art direction validation -------------------------------------------
 
 
-def test_unknown_recipe_kind_is_dropped():
-    recipes, _ = _validate_variants(
-        [{"kind": "deepfake", "key": "x", "params": {}}], wanted=10
+def test_treatment_layers_are_clamped():
+    """The model must not be able to misrepresent fabric or break a render."""
+    motion = Motion.from_dict({"speed": 9.0, "tight_crop": 99, "trim_head": -5})
+    grade = Grade.from_dict({"saturation": 2.5, "contrast": 3.0})
+
+    assert motion.speed == MOTION_BOUNDS["speed"][1]
+    assert motion.tight_crop == MOTION_BOUNDS["tight_crop"][1]
+    assert motion.trim_head == MOTION_BOUNDS["trim_head"][0]
+    assert grade.saturation <= 1.15
+    assert grade.contrast <= 1.10
+
+
+def test_hook_falls_back_to_known_styles_fonts_and_colours():
+    hook = Hook.from_dict(
+        {"text": "merhaba", "font": "comic sans", "style": "explode",
+         "text_colour": "#ff00ff", "accent_colour": "neon", "animation": "backflip"},
+        sanitiser=_safe_hook,
     )
-    # Only the injected control baseline survives.
-    assert all(r.kind in ALLOWED_KINDS for r in recipes)
-    assert "deepfake" not in {r.kind for r in recipes}
+    assert hook.font in FONTS
+    assert hook.style in HOOK_STYLES
+    assert hook.text_colour in PALETTE
+    assert hook.accent_colour in PALETTE
+    assert hook.animation in HOOK_ANIMATIONS
+
+
+def test_hook_without_text_is_dropped():
+    assert Hook.from_dict({"text": "   "}, sanitiser=_safe_hook) is None
+    assert Hook.from_dict(None, sanitiser=_safe_hook) is None
+
+
+def test_hallucinated_music_track_becomes_no_music():
+    """A filename the model invented must not crash the render."""
+    assert Music.from_dict({"track": "banger.mp3"}, available=["real.m4a"]) is None
+    assert Music.from_dict({"track": "real.m4a"}, available=["real.m4a"]).track == "real.m4a"
+
+
+def test_music_is_skipped_when_the_library_is_empty():
+    assert Music.from_dict({"track": "anything.mp3"}, available=[]) is None
+
+
+def test_music_gain_is_clamped_below_unity():
+    """A bed louder than the original would bury the product audio."""
+    assert Music.from_dict({"track": "a.m4a", "gain_db": 40}, available=["a.m4a"]).gain_db <= 0
 
 
 def test_control_baseline_is_injected_when_the_model_omits_it():
-    recipes, _ = _validate_variants(
-        [{"kind": "speed", "key": "fast", "params": {"factor": 1.1}}], wanted=2
+    treatments = _validate_treatments(
+        [{"key": "loud", "label": "x", "motion": {"speed": 1.1}, "grade": {},
+          "hook": None, "music": None, "vignette": False}],
+        wanted=2, tracks=[],
     )
-    assert recipes[0].kind == "control"
+    assert any(t.is_control for t in treatments)
 
 
 def test_batch_is_topped_up_when_the_model_under_delivers():
-    recipes, _ = _validate_variants(
-        [{"kind": "control", "key": "control", "params": {}}], wanted=10
+    treatments = _validate_treatments(
+        [{"key": "control", "label": "c", "motion": {}, "grade": {},
+          "hook": None, "music": None, "vignette": False}],
+        wanted=10, tracks=[],
     )
-    assert len(recipes) == 10
-    assert len({r.key for r in recipes}) == 10, "keys must stay unique"
+    assert len(treatments) == 10
+    assert len({t.key for t in treatments}) == 10
 
 
 def test_duplicate_keys_are_made_unique():
-    recipes, _ = _validate_variants([
-        {"kind": "control", "key": "same", "params": {}},
-        {"kind": "speed", "key": "same", "params": {"factor": 1.1}},
-    ], wanted=2)
-    assert len({r.key for r in recipes}) == len(recipes)
+    treatments = _validate_treatments([
+        {"key": "same", "label": "a", "motion": {}, "grade": {}, "hook": None,
+         "music": None, "vignette": False},
+        {"key": "same", "label": "b", "motion": {"speed": 1.1}, "grade": {},
+         "hook": None, "music": None, "vignette": False},
+    ], wanted=2, tracks=[])
+    assert len({t.key for t in treatments}) == len(treatments)
 
 
-def test_saturation_beyond_the_product_safe_cap_is_clamped():
-    """The model must not be able to misrepresent fabric colour."""
-    params = _clamp_params("grade", {"saturation": 2.5, "contrast": 3.0})
-
-    low, high, _ = PARAM_BOUNDS["grade"]["saturation"]
-    assert params["saturation"] == high <= 1.15
-    assert params["contrast"] == PARAM_BOUNDS["grade"]["contrast"][1]
+def test_non_list_treatment_payload_is_rejected():
+    assert _validate_treatments("not a list", 10, []) == []
+    assert _validate_treatments(None, 10, []) == []
 
 
-def test_speed_factor_cannot_be_set_to_something_unwatchable():
-    assert _clamp_params("speed", {"factor": 9.0})["factor"] == PARAM_BOUNDS["speed"]["factor"][1]
+def test_default_catalogue_is_genuinely_varied():
+    """Ten near-identical variants would waste the whole test."""
+    treatments = default_treatments(10, ["a.m4a", "b.m4a"])
+
+    assert len(treatments) == 10
+    assert treatments[0].is_control
+    hooked = [t for t in treatments if t.hook]
+    assert len({t.hook.style for t in hooked}) >= 4, "hook styles must differ"
+    assert len({t.hook.font for t in hooked}) >= 4, "fonts must differ"
+    assert len({t.hook.accent_colour for t in hooked}) >= 5, "colours must differ"
+    assert len({t.hook.text for t in hooked}) == len(hooked), "hook copy must differ"
+    assert any(t.music for t in treatments), "music should be used when available"
 
 
-def test_unspecified_params_are_left_out_not_defaulted_in():
-    """An omitted parameter should keep the renderer's own default."""
-    assert _clamp_params("grade", {"saturation": 1.05}) == {"saturation": 1.05}
-
-
-def test_text_hook_without_usable_text_is_dropped():
-    recipes, _ = _validate_variants([
-        {"kind": "control", "key": "control", "params": {}},
-        {"kind": "text_hook", "key": "hook", "params": {"text": "   "}},
-    ], wanted=2)
-    assert "hook" not in {r.key for r in recipes}
+def test_default_catalogue_without_music_still_works():
+    treatments = default_treatments(10, [])
+    assert all(t.music is None for t in treatments)
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -137,18 +187,13 @@ def test_hook_text_is_sanitised_for_drawtext(raw, expected):
 
 
 def test_hook_text_is_length_capped():
-    assert len(_safe_hook("A" * 200)) <= 42
+    assert len(_safe_hook("A" * 200)) <= MAX_HOOK_CHARS
 
 
 def test_keys_are_made_filesystem_and_ffmpeg_safe():
     assert _safe_key("Hızlı Giriş!!", 0, set()) == "hizli_giris"
     assert _safe_key("", 3, set()) == "variant_4"
     assert _safe_key("dup", 0, {"dup"}) == "dup_2"
-
-
-def test_non_list_variant_payload_is_rejected():
-    assert _validate_variants("not a list", 10) == ([], {})
-    assert _validate_variants(None, 10) == ([], {})
 
 
 # -- ads guard rails ----------------------------------------------------

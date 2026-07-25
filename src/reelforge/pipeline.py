@@ -14,7 +14,8 @@ from .adsmanager import AdsManager, format_review
 from .config import REPO_ROOT, Config
 from .director import direct
 from .dropbox_client import Dropbox, DropboxFile
-from .editor import VariantRenderer, ensure_ffmpeg, load_recipes, probe
+from .compositor import Compositor
+from .editor import ensure_ffmpeg, probe
 from .http import ApiError
 from .instagram import Instagram
 from .meta_ads import AdsError, MetaAds
@@ -24,7 +25,8 @@ from .state import Batch, BatchStatus, Store, Variant, parse_ts, utcnow
 
 log = logging.getLogger(__name__)
 
-RECIPES_PATH = REPO_ROOT / "variants.yaml"
+# Enough for variety without downloading a whole library every run.
+MAX_MUSIC_TRACKS = 12
 
 
 class PipelineError(RuntimeError):
@@ -103,7 +105,8 @@ def run_check(config: Config) -> int:
 
     dropbox = Dropbox(config)
     try:
-        for folder in (config.dropbox_inbox, config.dropbox_processed, config.dropbox_renders):
+        for folder in (config.dropbox_inbox, config.dropbox_processed,
+                       config.dropbox_renders, config.dropbox_music):
             dropbox.ensure_folder(folder)
         pending = dropbox.list_media(config.dropbox_inbox)
         print(f"[ok] Dropbox reachable; {len(pending)} media file(s) in {config.dropbox_inbox}")
@@ -126,8 +129,30 @@ def run_check(config: Config) -> int:
     else:
         print("[WARN] META_AD_ACCOUNT_ID / FACEBOOK_PAGE_ID unset -> `promote` disabled")
 
-    recipes = load_recipes(RECIPES_PATH, config.variant_count)
-    print(f"[ok] {len(recipes)} fallback recipes loaded: {', '.join(r.key for r in recipes)}")
+    from .director import default_treatments
+    from .treatment import available_fonts
+
+    fonts = available_fonts()
+    print(f"[{'ok' if fonts else 'FAIL'}] {len(fonts)} bundled fonts: {', '.join(fonts)}")
+    if not fonts:
+        problems.append("No bundled fonts found under assets/fonts")
+
+    fallback = default_treatments(config.variant_count, [])
+    print(f"[ok] {len(fallback)} fallback treatments available")
+
+    try:
+        music = Dropbox(config).list_audio(config.dropbox_music)
+        if music:
+            print(f"[ok] {len(music)} music track(s) in {config.dropbox_music}")
+        else:
+            print(f"[WARN] {config.dropbox_music} is empty -> no music layer.")
+            print("       Use tracks cleared for ads (e.g. Meta Sound Collection);")
+            print("       unlicensed audio gets the ad rejected and flags the account.")
+    except Exception as exc:
+        print(f"[WARN] Could not read music folder: {exc}")
+
+    print(f"[{'ok' if config.fal_api_key else 'WARN'}] "
+          f"fal.ai generative {'configured' if config.fal_api_key else 'not configured (FAL_KEY unset)'}")
 
     if config.ai_enabled:
         client = make_llm(config)
@@ -169,7 +194,8 @@ def run_publish(config: Config, store: Store) -> int:
         return 0
 
     dropbox = Dropbox(config)
-    for folder in (config.dropbox_inbox, config.dropbox_processed, config.dropbox_renders):
+    for folder in (config.dropbox_inbox, config.dropbox_processed,
+                   config.dropbox_renders, config.dropbox_music):
         dropbox.ensure_folder(folder)
 
     source = _next_source(dropbox, store, config)
@@ -201,8 +227,14 @@ def run_publish(config: Config, store: Store) -> int:
             source.name, info.width, info.height, info.duration, info.has_audio,
         )
 
+        # Licensed music beds only. Meta's rights system rejects an ad whose
+        # audio is not cleared and flags the account, so the tracks come from
+        # a folder Arda fills rather than from anywhere automatic.
+        music_dir = workdir / "music"
+        tracks = _fetch_music(dropbox, config, music_dir)
+
         # The model looks at real frames and decides how to cut this clip;
-        # without a key it silently falls back to the fixed catalogue.
+        # without a key it silently falls back to the default catalogue.
         direction = direct(
             make_llm(config),
             local_source,
@@ -211,8 +243,9 @@ def run_publish(config: Config, store: Store) -> int:
             filename=source.name,
             variant_count=config.variant_count,
             fallback_caption=build_caption(config, source.name),
+            music_tracks=tracks,
         )
-        recipes = direction.recipes
+        treatments = direction.treatments
         caption = direction.caption
         batch.direction = {
             "source": direction.source,
@@ -220,6 +253,7 @@ def run_publish(config: Config, store: Store) -> int:
             "observations": direction.observations,
             "rationales": direction.rationales,
             "caption": caption,
+            "treatments": [t.to_dict() for t in direction.treatments],
         }
         if direction.product_name:
             batch.product = direction.product_name
@@ -229,18 +263,22 @@ def run_publish(config: Config, store: Store) -> int:
             else "Variants from the default catalogue (no AI)"
         )
 
-        renderer = VariantRenderer(workdir / "out")
-        for recipe in recipes:
-            variant = Variant(key=recipe.key, label=recipe.label, recipe=recipe.kind)
+        renderer = Compositor(workdir / "out", music_dir if tracks else None)
+        for treatment in treatments:
+            variant = Variant(
+                key=treatment.key,
+                label=treatment.label,
+                recipe=treatment.summary(),
+            )
             batch.variants.append(variant)
             try:
-                rendered = renderer.render(local_source, recipe, info, batch.id)
+                rendered = renderer.render(local_source, treatment, info, batch.id)
                 variant.duration = probe(rendered).duration
                 variant.render_name = rendered.name
             except Exception as exc:
                 variant.status = "render_failed"
                 variant.error = str(exc)[:500]
-                log.error("Variant %s failed to render: %s", recipe.key, exc)
+                log.error("Variant %s failed to render: %s", treatment.key, exc)
                 continue
 
             if config.dry_run:
@@ -255,7 +293,7 @@ def run_publish(config: Config, store: Store) -> int:
             except Exception as exc:
                 variant.status = "upload_failed"
                 variant.error = str(exc)[:500]
-                log.error("Variant %s failed to upload: %s", recipe.key, exc)
+                log.error("Variant %s failed to upload: %s", treatment.key, exc)
                 continue
 
             result = instagram.publish_reel(
@@ -295,6 +333,29 @@ def run_publish(config: Config, store: Store) -> int:
 
     log.info("Batch %s: %d/%d variants published", batch.id, published, len(batch.variants))
     return 0 if published or config.dry_run else 1
+
+
+def _fetch_music(dropbox: Dropbox, config: Config, destination: Path) -> list[str]:
+    """Download the licensed music library once per batch."""
+    try:
+        tracks = dropbox.list_audio(config.dropbox_music)
+    except Exception as exc:  # noqa: BLE001 - music is optional
+        log.warning("Could not list music folder: %s", exc)
+        return []
+
+    if not tracks:
+        log.info("No music in %s; treatments render without a bed", config.dropbox_music)
+        return []
+
+    names: list[str] = []
+    for track in tracks[:MAX_MUSIC_TRACKS]:
+        try:
+            dropbox.download(track.path, destination / track.name)
+            names.append(track.name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not download %s: %s", track.name, exc)
+    log.info("Music library: %d track(s)", len(names))
+    return names
 
 
 def _next_source(dropbox: Dropbox, store: Store, config: Config) -> DropboxFile | None:

@@ -8,9 +8,9 @@ as a Meta A/B test.
 
 ```
 Dropbox inbox
-   -> AI looks at real frames: which edits suit THIS clip,
-      Turkish hook copy, caption, cover frame
-   -> 10 ffmpeg variants (1080x1920, Rec.709, loudness-matched)
+   -> AI looks at real frames and writes 10 full treatments:
+      motion + grade + hook copy/font/colour/style + music bed
+   -> 10 ffmpeg renders (1080x1920, Rec.709, loudness-matched)
    -> 10 trial reels on @annekiz.store
    -> 24h later: insights pulled, variants ranked
    -> report tells you which ones to graduate
@@ -51,7 +51,7 @@ normal reels rather than failing.
 
 | Layer | Who decides | Why |
 |---|---|---|
-| Which edits suit a clip, hook copy, caption, cover frame | **AI** | Needs judgement about footage. Fixed recipes cannot tell a dark clip from a bright one, and the hook line was the same string on every video. |
+| The whole creative treatment: motion, grade, hook copy/font/colour/style, music choice, cover frame | **AI** | Needs judgement about footage. Fixed recipes cannot tell a dark clip from a bright one, or which hook line suits this garment. |
 | Rendering, ranking, spend rules | **Code** | Already deterministic and known. A model adds risk here, not accuracy. |
 | Ad account actions | **AI proposes, code decides** | The model is good at reading a whole account at once. It is not something to give unsupervised write access to a live budget. |
 
@@ -156,6 +156,7 @@ Secrets:
 | `DROPBOX_APP_SECRET` | from step 2 |
 | `DROPBOX_REFRESH_TOKEN` | from step 2 |
 | `OPENROUTER_API_KEY` | from [openrouter.ai/keys](https://openrouter.ai/keys) — powers the art director and ad review |
+| `FAL_KEY` | optional, from [fal.ai](https://fal.ai) — generative video |
 | `TELEGRAM_BOT_TOKEN` | optional, for phone notifications |
 | `TELEGRAM_CHAT_ID` | optional |
 
@@ -172,6 +173,7 @@ Variables (all optional, sensible defaults apply):
 | `MAX_BATCHES_PER_DAY` | `1` | guard against burning through the inbox |
 | `AD_DAILY_BUDGET_TRY` | `150` | forced up to 100 minimum |
 | `DROPBOX_INBOX` | `/ReelForge/Gelen` | |
+| `DROPBOX_MUSIC` | `/ReelForge/Muzik` | ad-licensed tracks only |
 | `LLM_MODEL` | `anthropic/claude-sonnet-4.5` | Any vision-capable OpenRouter model. `check` verifies it exists. |
 | `AI_ADS_MODE` | `propose` | `propose`, `apply` or `off` |
 | `MAX_ACCOUNT_DAILY_BUDGET_TRY` | `500` | hard ceiling the AI cannot push past |
@@ -183,6 +185,7 @@ Created automatically on first run, or make them yourself:
 
 ```
 /ReelForge/Gelen       <- drop new footage here
+/ReelForge/Muzik       <- ad-licensed music beds (see the music section)
 /ReelForge/Islenen     <- moved here once published
 /ReelForge/Varyantlar  <- the 10 renders, kept for reference
 ```
@@ -246,16 +249,62 @@ once you activate them.
 
 ---
 
-## The ten variants
+## Music: read this before adding tracks
 
-With `OPENROUTER_API_KEY` set these are the **fallback** catalogue; the AI
-proposes a set tuned to each clip instead, choosing from the same recipe kinds
-and staying inside the clamped parameter ranges. A `control` baseline is always
-present, injected if the model omits it — without it you cannot tell whether an
-edit helped or merely differed. All variants carry the **same caption**, so the
-edit stays the only variable.
+This pipeline ends in an ad, and that changes the rules. Meta's Content Rights
+Management system checks the audio on anything you boost. Unlicensed music
+means **the ad is rejected and a copyright flag lands on the account — three
+flags in 90 days restricts audio on all of your ads.**
 
-Tunable in [`variants.yaml`](variants.yaml).
+Instagram's in-app music library does **not** grant commercial rights, and
+business accounts are limited to the Meta Sound Collection anyway.
+
+So the pipeline never fetches music. It reads whatever you put in
+`/ReelForge/Muzik`, and the AI picks which track suits which treatment.
+
+**Free and cleared for ads:** Meta Sound Collection (~15,000 tracks) in
+Meta Business Suite. Download the ones you like and drop them in the folder.
+Paid alternatives with ad licences: Epidemic Sound, Artlist.
+
+Leave the folder empty and every treatment simply renders without a bed.
+Nothing breaks.
+
+## Generative video (optional)
+
+`FAL_KEY` enables [fal.ai](https://fal.ai/docs/documentation) for genuinely
+generated visuals rather than filtered ones.
+
+Higgsfield was the original request. Its REST API is gated behind higher tiers
+and the contract is not publicly documented, so it cannot be driven unattended
+— fal.ai hosts the same underlying models (Veo 3, Seedance, Kling, Grok
+Imagine) behind a documented queue API and pay-per-use billing.
+
+Without the key nothing generative runs and the deterministic treatments carry
+the whole batch.
+
+## The ten treatments
+
+A treatment is a complete creative take, not a single lever. Each one stacks:
+
+| Layer | Options |
+|---|---|
+| **Motion** | head trim, speed, push-in, tighter crop, freeze on the opening frame — combinable |
+| **Grade** | brightness, contrast, saturation, gamma, temperature |
+| **Hook** | copy, one of 5 bundled fonts, 5 styles (`solid_bar`, `boxed`, `outline`, `underline`, `shadow_only`), 10 palette colours, 4 animations, 4 positions |
+| **Music** | which licensed bed, gain, start offset, whether to duck the original audio |
+| **Finish** | vignette on or off |
+
+That is what makes ten renders look like ten different edits rather than ten
+exports of one. The AI composes all of it per clip; without a key the built-in
+catalogue does the same thing with fixed combinations.
+
+A `control` baseline is always present, injected if the model omits it —
+without it you cannot tell whether an edit helped or merely differed. All
+treatments carry the **same caption**, so the edit stays the only variable.
+
+Fonts live in `assets/fonts` (SIL OFL). Hook text is capped at 42 characters,
+stripped of emoji and hashtags, and upper-cased, because `drawtext` cannot
+render emoji from these faces and long lines wrap badly on a phone.
 
 | # | Key | Change |
 |--:|---|---|
@@ -292,8 +341,8 @@ Identical across all ten, so it lifts the floor rather than biasing the test:
 You sell by colour — customers order a garment in a colour they saw in a video.
 A punchy, saturated render that misrepresents the fabric buys returns, not
 sales. Saturation is capped at 1.15 and there is a test enforcing it. Push the
-numbers in `variants.yaml` only after checking a render against the real
-garment.
+caps in `src/reelforge/treatment.py` only after checking a render against
+the real garment.
 
 ---
 

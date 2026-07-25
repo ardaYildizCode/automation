@@ -47,6 +47,8 @@ jobs:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          FAL_KEY: ${{ secrets.FAL_KEY }}
+          DROPBOX_MUSIC: ${{ vars.DROPBOX_MUSIC }}
           META_AD_ACCOUNT_ID: ${{ vars.META_AD_ACCOUNT_ID }}
           FACEBOOK_PAGE_ID: ${{ vars.FACEBOOK_PAGE_ID }}
           DROPBOX_INBOX: ${{ vars.DROPBOX_INBOX }}

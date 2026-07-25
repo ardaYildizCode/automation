@@ -92,6 +92,8 @@ class Config:
     dry_run: bool
 
     # --- AI --------------------------------------------------------------
+    dropbox_music: str = "/ReelForge/Muzik"
+    fal_api_key: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
     llm_base_url: str = ""
@@ -150,6 +152,8 @@ class Config:
                 "Siparis ve fiyat icin DM veya WhatsApp: {whatsapp}",
             ),
             dry_run=_optional("DRY_RUN", "false").lower() in {"1", "true", "yes"},
+            dropbox_music=_optional("DROPBOX_MUSIC", "/ReelForge/Muzik"),
+            fal_api_key=_optional("FAL_KEY"),
             llm_api_key=_optional("OPENROUTER_API_KEY"),
             llm_model=_optional("LLM_MODEL", DEFAULT_LLM_MODEL),
             llm_base_url=_optional("LLM_BASE_URL", "https://openrouter.ai/api/v1"),

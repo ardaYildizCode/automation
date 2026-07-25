@@ -19,7 +19,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ai import AiError, LlmClient, clamp
-from .editor import DEFAULT_RECIPES, MediaInfo, Recipe
+from .editor import MediaInfo
+from .treatment import (
+    FONTS,
+    HOOK_ANIMATIONS,
+    HOOK_POSITIONS,
+    HOOK_STYLES,
+    MAX_HOOK_CHARS,
+    PALETTE,
+    Grade,
+    Hook,
+    Motion,
+    Music,
+    Treatment,
+    control_treatment,
+)
 
 log = logging.getLogger(__name__)
 
@@ -79,14 +93,13 @@ no hashtags, no quotes.
 variants that differ only trivially.
 """
 
-RESPONSE_SCHEMA = {
+TREATMENT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["product", "observations", "caption", "cover_frame", "variants"],
+    "required": ["product", "observations", "caption", "cover_frame", "treatments"],
     "properties": {
         "product": {
-            "type": "object",
-            "additionalProperties": False,
+            "type": "object", "additionalProperties": False,
             "required": ["name", "colour", "notes"],
             "properties": {
                 "name": {"type": "string"},
@@ -95,44 +108,63 @@ RESPONSE_SCHEMA = {
             },
         },
         "observations": {
-            "type": "object",
-            "additionalProperties": False,
+            "type": "object", "additionalProperties": False,
             "required": ["exposure", "framing", "opening", "weaknesses"],
             "properties": {
-                "exposure": {"type": "string"},
-                "framing": {"type": "string"},
-                "opening": {"type": "string"},
-                "weaknesses": {"type": "string"},
+                "exposure": {"type": "string"}, "framing": {"type": "string"},
+                "opening": {"type": "string"}, "weaknesses": {"type": "string"},
             },
         },
         "caption": {"type": "string"},
         "cover_frame": {"type": "integer"},
-        "variants": {
+        "treatments": {
             "type": "array",
             "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["key", "label", "kind", "rationale", "params"],
+                "type": "object", "additionalProperties": False,
+                "required": ["key", "label", "rationale", "motion", "grade", "hook", "music", "vignette"],
                 "properties": {
                     "key": {"type": "string"},
                     "label": {"type": "string"},
-                    "kind": {"type": "string", "enum": sorted(ALLOWED_KINDS)},
                     "rationale": {"type": "string"},
-                    "params": {
-                        "type": "object",
-                        "additionalProperties": False,
+                    "vignette": {"type": "boolean"},
+                    "motion": {
+                        "type": "object", "additionalProperties": False,
                         "properties": {
-                            "seconds": {"type": "number"},
-                            "factor": {"type": "number"},
-                            "amount": {"type": "number"},
-                            "zoom": {"type": "number"},
-                            "brightness": {"type": "number"},
-                            "contrast": {"type": "number"},
-                            "saturation": {"type": "number"},
-                            "gamma": {"type": "number"},
+                            "trim_head": {"type": "number"}, "speed": {"type": "number"},
+                            "zoom_punch": {"type": "number"}, "tight_crop": {"type": "number"},
+                            "freeze_open": {"type": "number"},
+                        },
+                    },
+                    "grade": {
+                        "type": "object", "additionalProperties": False,
+                        "properties": {
+                            "brightness": {"type": "number"}, "contrast": {"type": "number"},
+                            "saturation": {"type": "number"}, "gamma": {"type": "number"},
                             "temperature": {"type": "number"},
-                            "fontsize": {"type": "number"},
+                        },
+                    },
+                    "hook": {
+                        "type": ["object", "null"], "additionalProperties": False,
+                        "properties": {
                             "text": {"type": "string"},
+                            "font": {"type": "string", "enum": sorted(FONTS)},
+                            "style": {"type": "string", "enum": sorted(HOOK_STYLES)},
+                            "position": {"type": "string", "enum": sorted(HOOK_POSITIONS)},
+                            "animation": {"type": "string", "enum": sorted(HOOK_ANIMATIONS)},
+                            "text_colour": {"type": "string", "enum": sorted(PALETTE)},
+                            "accent_colour": {"type": "string", "enum": sorted(PALETTE)},
+                            "font_size": {"type": "number"},
+                            "start": {"type": "number"},
+                            "duration": {"type": "number"},
+                        },
+                    },
+                    "music": {
+                        "type": ["object", "null"], "additionalProperties": False,
+                        "properties": {
+                            "track": {"type": "string"},
+                            "gain_db": {"type": "number"},
+                            "start": {"type": "number"},
+                            "duck_original": {"type": "boolean"},
                         },
                     },
                 },
@@ -144,7 +176,7 @@ RESPONSE_SCHEMA = {
 
 @dataclass
 class ArtDirection:
-    recipes: list[Recipe]
+    treatments: list[Treatment]
     caption: str = ""
     product_name: str = ""
     cover_frame: int = 0
@@ -193,6 +225,84 @@ def _fractions(count: int) -> list[float]:
     return [i / count for i in range(count)]
 
 
+def default_treatments(count: int, music_tracks: list[str]) -> list[Treatment]:
+    """Fallback set used when no model is configured or it returns nothing.
+
+    Still ten genuinely different edits -- distinct hook styles, fonts,
+    colours and music beds -- rather than ten exports of the same one.
+    """
+    palette = [
+        ("burgundy", "cream", "impact", "solid_bar", "top"),
+        ("rose", "white", "modern", "boxed", "upper"),
+        ("gold", "white", "condensed", "outline", "top"),
+        ("navy", "white", "editorial", "underline", "top"),
+        ("forest", "cream", "elegant", "shadow_only", "upper"),
+        ("coral", "white", "impact", "solid_bar", "center"),
+        ("lilac", "white", "condensed", "underline", "top"),
+        ("black", "gold", "modern", "boxed", "top"),
+        ("burgundy", "white", "editorial", "outline", "upper"),
+    ]
+    hooks = [
+        "ISTEDIGINIZ RENK VE BEDENDE",
+        "ANNE KIZ AYNI KOMBIN",
+        "OLCUNUZE OZEL DIKILIYOR",
+        "COCUGUNUZUN YASINA GORE",
+        "EL ISCILIGI DETAYLAR",
+        "SIPARIS ICIN DM",
+        "YENI SEZON MODELLERI",
+        "HER BEDEN MEVCUT",
+        "SINIRLI SAYIDA",
+    ]
+    motions = [
+        Motion(trim_head=1.2),
+        Motion(speed=1.08),
+        Motion(tight_crop=1.18),
+        Motion(zoom_punch=0.16),
+        Motion(freeze_open=0.8),
+        Motion(trim_head=0.8, tight_crop=1.12),
+        Motion(speed=1.05, zoom_punch=0.12),
+        Motion(),
+        Motion(trim_head=0.5, speed=1.1),
+    ]
+    grades = [
+        Grade(),
+        Grade(brightness=0.04, contrast=1.08, saturation=1.10),
+        Grade(temperature=0.06, saturation=1.05),
+        Grade(temperature=-0.05, contrast=1.06),
+        Grade(brightness=0.03),
+        Grade(contrast=1.05, saturation=1.04),
+        Grade(temperature=0.04),
+        Grade(brightness=0.02, contrast=1.04),
+        Grade(),
+    ]
+
+    out = [control_treatment()]
+    for index in range(min(count - 1, len(palette))):
+        accent, text_colour, font, style, position = palette[index]
+        track = music_tracks[index % len(music_tracks)] if music_tracks else ""
+        out.append(
+            Treatment(
+                key=f"t{index + 2:02d}_{style}",
+                label=f"{style} / {font} / {accent}",
+                motion=motions[index],
+                grade=grades[index],
+                hook=Hook(
+                    text=hooks[index],
+                    font=font,
+                    style=style,
+                    position=position,
+                    animation=("slide_up", "fade", "pop")[index % 3],
+                    text_colour=text_colour,
+                    accent_colour=accent,
+                ),
+                music=Music(track=track) if track else None,
+                vignette=index in (4, 8),
+                rationale="Varsayilan katalog",
+            )
+        )
+    return out[:count]
+
+
 def direct(
     client: LlmClient | None,
     source: Path,
@@ -202,140 +312,124 @@ def direct(
     filename: str,
     variant_count: int,
     fallback_caption: str,
+    music_tracks: list[str] | None = None,
 ) -> ArtDirection:
-    """Produce the recipe set and copy for one clip.
-
-    Falls back to the deterministic catalogue whenever the model is
-    unavailable or returns something unusable -- a batch always ships.
-    """
+    """Produce the full set of treatments and copy for one clip."""
+    tracks = music_tracks or []
     defaults = ArtDirection(
-        recipes=list(DEFAULT_RECIPES[:variant_count]),
+        treatments=default_treatments(variant_count, tracks),
         caption=fallback_caption,
         source="defaults",
     )
 
     if client is None or not client.enabled:
-        log.info("No LLM configured; using the default recipe catalogue")
+        log.info("No LLM configured; using the default treatment catalogue")
         return defaults
 
     frames = extract_frames(source, workdir / "frames", info)
     if not frames:
-        log.warning("No frames extracted; using the default recipe catalogue")
+        log.warning("No frames extracted; using the default treatment catalogue")
         return defaults
 
-    orientation = "dikey" if info.is_portrait else "yatay"
+    music_note = (
+        "Kullanilabilir muzik dosyalari (sadece bu isimlerden birini sec, "
+        f"uydurma): {', '.join(tracks)}"
+        if tracks
+        else "Muzik klasoru bos - her treatment icin music alanini null birak."
+    )
     user_prompt = (
         f"Dosya adi: {filename}\n"
         f"Sure: {info.duration:.1f} saniye\n"
-        f"Cozunurluk: {info.width}x{info.height} ({orientation})\n"
+        f"Cozunurluk: {info.width}x{info.height} "
+        f"({'dikey' if info.is_portrait else 'yatay'})\n"
         f"Ses var mi: {'evet' if info.has_audio else 'hayir'}\n"
-        f"Kaç kare gonderiliyor: {len(frames)} "
-        f"(sirayla klibin basindan sonuna dogru, 0'dan basliyor)\n\n"
-        f"Tam olarak {variant_count} varyant öner. Ilk varyant mutlaka "
-        f"kind='control' olsun (hicbir degisiklik yok, karsilastirma tabani).\n"
-        f"cover_frame olarak 0 ile {len(frames) - 1} arasinda, urunu en iyi "
-        f"gosteren karenin indeksini ver."
+        f"Gonderilen kare sayisi: {len(frames)} (bastan sona, 0'dan basliyor)\n"
+        f"{music_note}\n\n"
+        f"Tam olarak {variant_count} treatment uret. Ilk treatment kontrol olsun: "
+        f"motion ve grade varsayilan (degisiklik yok), hook null, music null.\n"
+        f"cover_frame: 0 ile {len(frames) - 1} arasinda, urunu en iyi gosteren kare."
     )
 
     try:
         raw = client.complete_json(
             system=SYSTEM_PROMPT,
             user=user_prompt,
-            schema=RESPONSE_SCHEMA,
+            schema=TREATMENT_SCHEMA,
             images=frames,
             label="art_direction",
         )
-    except (AiError, Exception) as exc:  # noqa: BLE001 - never fail the batch
+    except Exception as exc:  # noqa: BLE001 - a batch must always ship
         log.error("Art direction failed, falling back to defaults: %s", exc)
         return defaults
 
-    recipes, rationales = _validate_variants(raw.get("variants"), variant_count)
-    if not recipes:
-        log.warning("Model proposed no usable variants; using defaults")
+    treatments = _validate_treatments(raw.get("treatments"), variant_count, tracks)
+    if not treatments:
+        log.warning("Model proposed no usable treatments; using defaults")
         return defaults
 
     product = raw.get("product") or {}
     caption = str(raw.get("caption") or "").strip() or fallback_caption
 
     direction = ArtDirection(
-        recipes=recipes,
+        treatments=treatments,
         caption=caption,
         product_name=str(product.get("name") or "").strip(),
         cover_frame=int(clamp(raw.get("cover_frame"), 0, len(frames) - 1, 0)),
         observations={k: str(v) for k, v in (raw.get("observations") or {}).items()},
-        rationales=rationales,
+        rationales={t.key: t.rationale for t in treatments},
         source="ai",
     )
     log.info(
-        "Art direction: %s | %d variants | cover frame %d",
-        direction.product_name or "?", len(recipes), direction.cover_frame,
+        "Art direction: %s | %d treatments | cover frame %d",
+        direction.product_name or "?", len(treatments), direction.cover_frame,
     )
     return direction
 
 
-def _validate_variants(proposed: object, wanted: int) -> tuple[list[Recipe], dict[str, str]]:
-    """Turn model output into recipes, dropping anything unsafe."""
+def _validate_treatments(
+    proposed: object, wanted: int, tracks: list[str]
+) -> list[Treatment]:
+    """Turn model output into treatments, dropping anything unsafe."""
     if not isinstance(proposed, list):
-        return [], {}
+        return []
 
-    recipes: list[Recipe] = []
-    rationales: dict[str, str] = {}
+    treatments: list[Treatment] = []
     seen: set[str] = set()
 
     for index, entry in enumerate(proposed):
         if not isinstance(entry, dict):
             continue
-        kind = str(entry.get("kind") or "").strip()
-        if kind not in ALLOWED_KINDS:
-            log.warning("Dropping variant with unknown kind %r", kind)
-            continue
-
         key = _safe_key(entry.get("key"), index, seen)
         seen.add(key)
-
-        params = _clamp_params(kind, entry.get("params"))
-        if kind == "text_hook":
-            text = _safe_hook(entry.get("params", {}).get("text"))
-            if not text:
-                log.warning("Dropping text_hook variant with unusable text")
-                continue
-            params["text"] = text
-
-        recipes.append(
-            Recipe(
+        treatments.append(
+            Treatment(
                 key=key,
                 label=str(entry.get("label") or key)[:60],
-                kind=kind,
-                params=params,
+                motion=Motion.from_dict(entry.get("motion")),
+                grade=Grade.from_dict(entry.get("grade")),
+                hook=Hook.from_dict(entry.get("hook"), sanitiser=_safe_hook),
+                music=Music.from_dict(entry.get("music"), available=tracks),
+                vignette=bool(entry.get("vignette")),
+                rationale=str(entry.get("rationale") or "")[:300],
             )
         )
-        rationales[key] = str(entry.get("rationale") or "")[:300]
 
-    if not recipes:
-        return [], {}
+    if not treatments:
+        return []
 
-    # A batch without an untouched baseline cannot tell "better" from "different".
-    if not any(r.kind == "control" for r in recipes):
-        recipes.insert(0, DEFAULT_RECIPES[0])
+    # A batch without an untouched baseline cannot separate "better" from
+    # "different", so one is inserted if the model did not provide it.
+    if not any(t.is_control for t in treatments):
+        treatments.insert(0, control_treatment())
 
-    # Top up from the catalogue if the model under-delivered.
-    for fallback in DEFAULT_RECIPES:
-        if len(recipes) >= wanted:
-            break
-        if fallback.key not in {r.key for r in recipes}:
-            recipes.append(fallback)
+    if len(treatments) < wanted:
+        for extra in default_treatments(wanted, tracks):
+            if len(treatments) >= wanted:
+                break
+            if extra.key not in {t.key for t in treatments}:
+                treatments.append(extra)
 
-    return recipes[:wanted], rationales
-
-
-def _clamp_params(kind: str, params: object) -> dict:
-    bounds = PARAM_BOUNDS.get(kind, {})
-    supplied = params if isinstance(params, dict) else {}
-    out: dict = {}
-    for name, (low, high, default) in bounds.items():
-        if name in supplied:
-            out[name] = clamp(supplied[name], low, high, default)
-    return out
+    return treatments[:wanted]
 
 
 def _safe_key(value: object, index: int, seen: set[str]) -> str:
@@ -350,11 +444,9 @@ def _safe_key(value: object, index: int, seen: set[str]) -> str:
 
 def _safe_hook(value: object) -> str:
     """Hook text must be short, plain and renderable by drawtext."""
-    text = str(value or "").strip().strip('"“”')
+    text = str(value or "").strip().strip('"\u201c\u201d')
     text = re.sub(r"[\r\n]+", " ", text)
     text = re.sub(r"[#@]", "", text)
-    # drawtext cannot render emoji from the bundled fonts; strip anything
-    # outside the Latin/Turkish range rather than shipping tofu boxes.
     text = "".join(ch for ch in text if ch.isprintable() and ord(ch) < 0x2000)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:MAX_HOOK_CHARS].strip().upper()
