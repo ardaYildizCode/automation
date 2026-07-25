@@ -395,7 +395,7 @@ no database, and full history in git. `reports/` holds every ranking report.
 PYTHONPATH=src python -m pytest tests/ -q
 ```
 
-158 tests. The editor ones render real media through ffmpeg, because filtergraph
+157 tests. The editor ones render real media through ffmpeg, because filtergraph
 mistakes otherwise surface at 06:00 UTC rather than in CI. The AI ones feed
 malformed and hostile model output through the validators — invented ad set
 ids, out-of-range saturation, emoji in hook text — because that is exactly what

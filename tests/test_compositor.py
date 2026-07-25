@@ -208,5 +208,38 @@ def test_drawbox_uses_frame_relative_coordinates(comp):
     treatment = Treatment("bar", "bar", hook=hook(style="solid_bar", position="center"))
     _, graph, _, _, _ = comp._build(treatment, info, has_music=False)
 
-    bar = [seg for seg in graph.split(",") if seg.startswith("drawbox")][0]
-    assert "ih*" in bar, "drawbox must position against the input height"
+    index = graph.index("drawbox")
+    bar = graph[index : graph.index(",", index)]
+    assert "drawbox" in graph, "solid_bar must draw a bar"
+    assert "ih*" in bar, f"drawbox must position against the input height, got {bar}"
+    assert "y=h*" not in bar, "frame-height syntax in drawbox puts the bar at the top"
+
+
+@pytest.mark.parametrize("with_music", [False, True])
+def test_silent_source_terminates(comp, portrait_silent_video: Path, with_music: bool):
+    """Synthesised silence and a looped music bed are both infinite streams.
+    Without -shortest the encode never finishes, which hangs the whole batch."""
+    info = probe(portrait_silent_video)
+    assert not info.has_audio
+
+    treatment = Treatment(
+        "term", "terminates",
+        music=Music.from_dict({"track": "bed.m4a"}, available=["bed.m4a"]) if with_music else None,
+    )
+    output = comp.render(portrait_silent_video, treatment, info, f"term-{with_music}")
+
+    rendered = probe(output)
+    # A runaway encode would produce something far longer than the source.
+    assert rendered.duration < info.duration + 2.0
+    assert rendered.has_audio
+
+
+def test_music_does_not_outlast_the_video(comp, landscape_video: Path):
+    """The bed loops indefinitely; the output must still end with the picture."""
+    info = probe(landscape_video)
+    treatment = Treatment(
+        "len", "length",
+        music=Music.from_dict({"track": "bed.m4a"}, available=["bed.m4a"]),
+    )
+    rendered = probe(comp.render(landscape_video, treatment, info, "music-length"))
+    assert rendered.duration < info.duration + 2.0

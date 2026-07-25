@@ -1,8 +1,13 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+# Encode speed, not encode quality, is what the render tests are checking.
+os.environ.setdefault("ENCODE_PRESET", "ultrafast")
+os.environ.setdefault("ENCODE_CRF", "28")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 

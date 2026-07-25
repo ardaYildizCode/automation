@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import subprocess
 from pathlib import Path
 
@@ -34,8 +35,11 @@ from .treatment import HOOK_POSITIONS, Hook, Treatment, colour, font_path
 
 log = logging.getLogger(__name__)
 
-ENCODE_CRF = 19
-ENCODE_PRESET = "medium"
+ENCODE_CRF = int(os.environ.get("ENCODE_CRF") or 19)
+# `medium` is meaningfully cleaner than a fast preset once Instagram re-encodes
+# on top of it. Overridable so the test suite does not pay for quality it never
+# looks at.
+ENCODE_PRESET = os.environ.get("ENCODE_PRESET") or "medium"
 AUDIO_FINISH = "loudnorm=I=-14:TP=-1.5:LRA=11"
 # How far the original audio ducks under a music bed, in dB.
 DUCK_DB = -9.0
@@ -82,6 +86,10 @@ class Compositor:
             "-color_trc", "bt709", "-color_range", "tv",
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart",
+            # Both synthesised silence and a looped music bed are infinite
+            # streams. Without this the encode never terminates on any source
+            # that has no audio of its own.
+            "-shortest",
             str(output),
         ]
 
