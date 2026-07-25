@@ -1,0 +1,86 @@
+name: Graduate and promote
+
+# Run this after you have tapped "Share with everyone" on the winning reel in
+# the Instagram app. It records the graduation and builds a PAUSED ad from the
+# winner.
+on:
+  workflow_dispatch:
+    inputs:
+      batch_id:
+        description: "Batch id from the measurement report"
+        required: true
+        type: string
+      budget:
+        description: "Daily budget in TRY (blank uses the default)"
+        required: false
+        type: string
+      skip_ad:
+        description: "Only record the graduation, do not create an ad"
+        type: boolean
+        default: false
+
+concurrency:
+  group: reelforge-state
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      IG_USER_ID: ${{ secrets.IG_USER_ID }}
+      IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+      META_AD_ACCOUNT_ID: ${{ vars.META_AD_ACCOUNT_ID }}
+      FACEBOOK_PAGE_ID: ${{ vars.FACEBOOK_PAGE_ID }}
+      AD_DAILY_BUDGET_TRY: ${{ vars.AD_DAILY_BUDGET_TRY }}
+      WHATSAPP_NUMBER: ${{ vars.WHATSAPP_NUMBER }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Record graduation
+        run: python -m reelforge graduate "${{ inputs.batch_id }}"
+
+      - name: Create paused ad
+        if: ${{ !inputs.skip_ad }}
+        run: |
+          if [ -n "${{ inputs.budget }}" ]; then
+            python -m reelforge promote "${{ inputs.batch_id }}" --budget "${{ inputs.budget }}"
+          else
+            python -m reelforge promote "${{ inputs.batch_id }}"
+          fi
+
+      - name: Commit state
+        if: always()
+        run: |
+          if [ -z "$(git status --porcelain state reports)" ]; then
+            echo "No state change."
+            exit 0
+          fi
+          git config user.name "reelforge[bot]"
+          git config user.email "reelforge@users.noreply.github.com"
+          git add state reports
+          git commit -m "chore(state): promote ${{ inputs.batch_id }} [skip ci]"
+          for attempt in 1 2 3 4; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "Push attempt $attempt failed; retrying."
+            sleep $((2 ** attempt))
+          done
+          exit 1

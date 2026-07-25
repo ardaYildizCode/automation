@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+*.egg-info/
+
+# Renders are transient; the copies that matter live in Dropbox.
+/renders/
+*.mp4
+*.mov

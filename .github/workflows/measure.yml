@@ -1,0 +1,72 @@
+name: Measure and rank
+
+# Pulls insights for any batch older than MEASURE_AFTER_HOURS, ranks the
+# variants and writes the report telling you which reel to graduate.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Measure now, ignoring the age threshold"
+        type: boolean
+        default: false
+
+concurrency:
+  group: reelforge-state
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Measure
+        env:
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          MEASURE_AFTER_HOURS: ${{ vars.MEASURE_AFTER_HOURS }}
+          MIN_REACH_PER_VARIANT: ${{ vars.MIN_REACH_PER_VARIANT }}
+          TRIAL_GRADUATION_STRATEGY: ${{ vars.TRIAL_GRADUATION_STRATEGY }}
+          WEIGHT_RETENTION: ${{ vars.WEIGHT_RETENTION }}
+          WEIGHT_SHARES: ${{ vars.WEIGHT_SHARES }}
+          WEIGHT_SAVES: ${{ vars.WEIGHT_SAVES }}
+          WEIGHT_ENGAGEMENT: ${{ vars.WEIGHT_ENGAGEMENT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONPATH: src
+        run: python -m reelforge measure ${{ inputs.force && '--force' || '' }}
+
+      - name: Commit state
+        run: |
+          if [ -z "$(git status --porcelain state reports)" ]; then
+            echo "No state change."
+            exit 0
+          fi
+          git config user.name "reelforge[bot]"
+          git config user.email "reelforge@users.noreply.github.com"
+          git add state reports
+          git commit -m "chore(state): measure run [skip ci]"
+          for attempt in 1 2 3 4; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "Push attempt $attempt failed; retrying."
+            sleep $((2 ** attempt))
+          done
+          exit 1
